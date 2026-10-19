@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi Video Player</title>
+<style>
+  :root {
+    --bg: #0e0f12;
+    --panel: #181a20;
+    --text: #e8e9ec;
+    --muted: #8b8f99;
+    --accent: #4f9cff;
+    --accent-dim: rgba(79, 156, 255, 0.25);
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 8px 12px; background: var(--panel); border-bottom: 1px solid #262932;
+  }
+  header .spacer { flex: 1; }
+  button, label.btn {
+    background: #262a33; color: var(--text); border: 1px solid #333845;
+    border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer;
+    user-select: none;
+  }
+  button:hover, label.btn:hover { background: #2f3440; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .hint { color: var(--muted); font-size: 12px; }
+  input[type=file] { display: none; }
+
+  #grid {
+    flex: 1; display: grid; gap: 4px; padding: 4px; min-height: 0;
+  }
+  #empty {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 12px; color: var(--muted);
+    border: 2px dashed #2a2e38; margin: 16px; border-radius: 12px;
+  }
+  body.dragging #empty, body.dragging #grid { outline: 3px dashed var(--accent); outline-offset: -6px; }
+
+  .tile {
+    position: relative; background: #000; overflow: hidden; min-height: 0;
+    border-radius: 4px; cursor: pointer; outline: 3px solid transparent; outline-offset: -3px;
+  }
+  .tile.selected { outline-color: var(--accent); }
+  .tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+  .badge {
+    position: absolute; top: 8px; left: 8px; padding: 3px 8px; border-radius: 4px;
+    background: rgba(0,0,0,0.6); font-size: 12px; max-width: calc(100% - 60px);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+  }
+  .audio-ind {
+    position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.6); font-size: 14px; pointer-events: none;
+  }
+  .tile.selected .audio-ind { background: var(--accent); }
+
+  .controls {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    background: linear-gradient(transparent, rgba(0,0,0,0.85));
+    opacity: 0; transition: opacity 0.15s; cursor: default;
+  }
+  .tile:hover .controls { opacity: 1; }
+  .controls button { padding: 4px 10px; background: rgba(255,255,255,0.12); border: none; }
+  .controls button:hover { background: rgba(255,255,255,0.25); }
+  .controls input[type=range] { flex: 1; min-width: 40px; accent-color: var(--accent); }
+  .controls input.vol { flex: 0 0 70px; }
+  .controls .time { font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <label class="btn primary" for="files" style="background:var(--accent);border-color:var(--accent);color:#fff">Open videos…</label>
+  <input id="files" type="file" accept="video/*" multiple>
+  <button id="playAll" disabled>▶ Play all</button>
+  <button id="restartAll" disabled>⏮ Restart all</button>
+  <button id="syncAll" disabled title="Snap every video to the first video's timestamp">⇆ Sync</button>
+  <span class="spacer"></span>
+  <span class="hint">Click a video to toggle its audio</span>
+  <button id="audioAll" disabled>🔊 All audio</button>
+  <button id="audioNone" disabled>🔇 No audio</button>
+  <button id="clear" disabled>Clear</button>
+</header>
+
+<div id="empty">
+  <div style="font-size:40px">🎞️</div>
+  <div>Click <b>Open videos…</b> or drag video files here</div>
+</div>
+<div id="grid" hidden></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const grid = $('grid'), empty = $('empty'), fileInput = $('files');
+const playAllBtn = $('playAll');
+let tiles = []; // { el, video, url }
+
+const fmt = (s) => {
+  if (!isFinite(s)) return '0:00';
+  s = Math.floor(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+};
+
+function layout() {
+  const n = tiles.length;
+  const hasVideos = n > 0;
+  grid.hidden = !hasVideos;
+  empty.hidden = hasVideos;
+  for (const id of ['playAll', 'restartAll', 'syncAll', 'audioAll', 'audioNone', 'clear']) $(id).disabled = !hasVideos;
+  if (!hasVideos) return;
+
+  // Pick the column count that makes tiles closest to 16:9 for the current window.
+  const W = grid.clientWidth || window.innerWidth, H = grid.clientHeight || window.innerHeight;
+  let best = 1, bestScore = Infinity;
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const tileW = W / cols, tileH = H / rows;
+    const area = Math.min(tileW, tileH * 16 / 9) * Math.min(tileH, tileW * 9 / 16);
+    const score = -area;
+    if (score < bestScore) { bestScore = score; best = cols; }
+  }
+  grid.style.gridTemplateColumns = `repeat(${best}, 1fr)`;
+  grid.style.gridTemplateRows = `repeat(${Math.ceil(n / best)}, 1fr)`;
+}
+
+function setSelected(t, on) {
+  t.el.classList.toggle('selected', on);
+  t.video.muted = !on;
+  t.el.querySelector('.audio-ind').textContent = on ? '🔊' : '🔇';
+}
+
+function updatePlayAllLabel() {
+  const anyPlaying = tiles.some((t) => !t.video.paused && !t.video.ended);
+  playAllBtn.textContent = anyPlaying ? '⏸ Pause all' : '▶ Play all';
+}
+
+function addFiles(fileList) {
+  const files = [...fileList].filter((f) => f.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|m4v|ogv)$/i.test(f.name));
+  for (const file of files) {
+    const url = URL.createObjectURL(file);
+    const el = document.createElement('div');
+    el.className = 'tile';
+    el.innerHTML = `
+      <video preload="auto" playsinline></video>
+      <div class="badge"></div>
+      <div class="audio-ind"></div>
+      <div class="controls">
+        <button class="pp" title="Play/Pause">▶</button>
+        <span class="time">0:00 / 0:00</span>
+        <input class="seek" type="range" min="0" max="1000" value="0">
+        <span title="Volume">🔉</span>
+        <input class="vol" type="range" min="0" max="1" step="0.05" value="1">
+      </div>`;
+    const video = el.querySelector('video');
+    video.src = url;
+    el.querySelector('.badge').textContent = file.name;
+    el.querySelector('.badge').title = file.name;
+
+    const t = { el, video, url };
+    tiles.push(t);
+    setSelected(t, false);
+
+    const pp = el.querySelector('.pp'), seek = el.querySelector('.seek'),
+          time = el.querySelector('.time'), vol = el.querySelector('.vol');
+    let seeking = false;
+
+    const refresh = () => {
+      pp.textContent = video.paused ? '▶' : '⏸';
+      time.textContent = `${fmt(video.currentTime)} / ${fmt(video.duration)}`;
+      if (!seeking && video.duration) seek.value = (video.currentTime / video.duration) * 1000;
+    };
+    ['timeupdate', 'loadedmetadata', 'play', 'pause', 'ended'].forEach((e) => video.addEventListener(e, refresh));
+    ['play', 'pause', 'ended'].forEach((e) => video.addEventListener(e, updatePlayAllLabel));
+
+    // Clicking the video area toggles audio; clicks inside the controls bar don't.
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.controls')) return;
+      setSelected(t, !el.classList.contains('selected'));
+    });
+    pp.addEventListener('click', () => (video.paused ? video.play() : video.pause()));
+    seek.addEventListener('input', () => {
+      seeking = true;
+      if (video.duration) video.currentTime = (seek.value / 1000) * video.duration;
+    });
+    seek.addEventListener('change', () => (seeking = false));
+    vol.addEventListener('input', () => (video.volume = vol.value));
+
+    grid.appendChild(el);
+  }
+  layout();
+}
+
+fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
+
+playAllBtn.addEventListener('click', () => {
+  const anyPlaying = tiles.some((t) => !t.video.paused && !t.video.ended);
+  if (anyPlaying) tiles.forEach((t) => t.video.pause());
+  else tiles.forEach((t) => t.video.play().catch(() => {}));
+});
+$('restartAll').addEventListener('click', () => {
+  tiles.forEach((t) => { t.video.currentTime = 0; t.video.play().catch(() => {}); });
+});
+$('syncAll').addEventListener('click', () => {
+  if (!tiles.length) return;
+  const ref = tiles[0].video.currentTime;
+  tiles.forEach((t) => (t.video.currentTime = Math.min(ref, t.video.duration || ref)));
+});
+$('audioAll').addEventListener('click', () => tiles.forEach((t) => setSelected(t, true)));
+$('audioNone').addEventListener('click', () => tiles.forEach((t) => setSelected(t, false)));
+$('clear').addEventListener('click', () => {
+  tiles.forEach((t) => { t.video.pause(); t.video.removeAttribute('src'); t.video.load(); URL.revokeObjectURL(t.url); });
+  tiles = [];
+  grid.innerHTML = '';
+  layout();
+  updatePlayAllLabel();
+});
+
+// Keyboard: space toggles play/pause on everything.
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && tiles.length && e.target.tagName !== 'INPUT') { e.preventDefault(); playAllBtn.click(); }
+});
+
+// Drag and drop anywhere on the page.
+let dragDepth = 0;
+document.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+document.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => {
+  e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
+  addFiles(e.dataTransfer.files);
+});
+
+window.addEventListener('resize', layout);
+layout();
+</script>
+</body>
+</html>
