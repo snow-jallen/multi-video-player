@@ -58,6 +58,9 @@
     border-radius: 4px; cursor: pointer; outline: 3px solid transparent; outline-offset: -3px;
   }
   .tile.selected { outline-color: var(--accent); }
+  .tile { container-type: inline-size; }
+  header label.toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  header label.toggle input { accent-color: var(--accent); margin: 0; }
   .tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
 
   .badge {
@@ -84,6 +87,8 @@
   .controls input[type=range] { flex: 1; min-width: 40px; accent-color: var(--accent); }
   .controls input.vol { flex: 0 0 70px; }
   .controls .time { font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; }
+  /* Small side tiles in focus view: drop the volume slider so the bar fits. */
+  @container (max-width: 400px) { .controls .vol-icon, .controls input.vol { display: none; } }
 </style>
 </head>
 <body>
@@ -95,6 +100,9 @@
   <button id="restartAll" disabled>⏮ Restart all</button>
   <button id="syncAll" disabled title="Snap every video to the first video's timestamp">⇆ Sync</button>
   <span class="spacer"></span>
+  <label class="hint toggle" title="Making a video primary gives it the audio and mutes the rest">
+    <input type="checkbox" id="audioFollows"> Audio follows primary
+  </label>
   <span class="hint">Click a video to toggle its audio</span>
   <button id="audioAll" disabled>🔊 All audio</button>
   <button id="audioNone" disabled>🔇 No audio</button>
@@ -114,6 +122,8 @@ const grid = $('grid'), empty = $('empty'), fileInput = $('files');
 const playAllBtn = $('playAll');
 const MAX_VIDEOS = 9;
 let tiles = []; // { el, video, url }
+let primary = null; // tile shown large in the center, or null for the plain grid
+let nextTileId = 0;
 
 let toastTimer;
 function toast(msg) {
@@ -143,6 +153,33 @@ function layout() {
   $('count').textContent = hasVideos ? `${n} / ${MAX_VIDEOS}` : `up to ${MAX_VIDEOS} videos`;
   if (!hasVideos) return;
 
+  for (const t of tiles) {
+    const isPrimary = t === primary;
+    t.el.classList.toggle('primary', isPrimary);
+    const zoom = t.el.querySelector('.zoom');
+    zoom.textContent = isPrimary ? '⤡' : '⤢';
+    zoom.title = isPrimary ? 'Back to grid' : 'Make primary';
+    t.el.style.gridColumn = t.el.style.gridRow = '';
+  }
+
+  // Focus view: primary fills the center column, the rest split between the left and right columns.
+  // Tiles are only re-placed with grid-column/grid-row, never moved in the DOM, because
+  // detaching a <video> pauses it and would break sync.
+  if (primary && n > 1) {
+    const others = tiles.filter((t) => t !== primary);
+    const leftCount = Math.ceil(others.length / 2);
+    grid.style.gridTemplateColumns = 'minmax(0, 1fr) minmax(0, 3fr) minmax(0, 1fr)';
+    grid.style.gridTemplateRows = `repeat(${leftCount}, minmax(0, 1fr))`;
+    primary.el.style.gridColumn = '2';
+    primary.el.style.gridRow = '1 / -1';
+    others.forEach((t, i) => {
+      const left = i < leftCount;
+      t.el.style.gridColumn = left ? '1' : '3';
+      t.el.style.gridRow = String((left ? i : i - leftCount) + 1);
+    });
+    return;
+  }
+
   // Pick the column count that makes tiles closest to 16:9 for the current window.
   const W = grid.clientWidth || window.innerWidth, H = grid.clientHeight || window.innerHeight;
   let best = 1, bestScore = Infinity;
@@ -161,6 +198,13 @@ function setSelected(t, on) {
   t.el.classList.toggle('selected', on);
   t.video.muted = !on;
   t.el.querySelector('.audio-ind').textContent = on ? '🔊' : '🔇';
+}
+
+function setPrimary(t) {
+  primary = primary === t ? null : t;
+  if (primary && $('audioFollows').checked) tiles.forEach((x) => setSelected(x, x === primary));
+  if (document.startViewTransition) document.startViewTransition(layout);
+  else layout();
 }
 
 function updatePlayAllLabel() {
@@ -187,14 +231,16 @@ function addFiles(fileList) {
         <button class="pp" title="Play/Pause">▶</button>
         <span class="time">0:00 / 0:00</span>
         <input class="seek" type="range" min="0" max="1000" value="0">
-        <span title="Volume">🔉</span>
+        <span class="vol-icon" title="Volume">🔉</span>
         <input class="vol" type="range" min="0" max="1" step="0.05" value="1">
+        <button class="zoom" title="Make primary">⤢</button>
       </div>`;
     const video = el.querySelector('video');
     video.src = url;
     el.querySelector('.badge').textContent = file.name;
     el.querySelector('.badge').title = file.name;
 
+    el.style.viewTransitionName = `tile-${nextTileId++}`;
     const t = { el, video, url };
     tiles.push(t);
     setSelected(t, false);
@@ -217,6 +263,7 @@ function addFiles(fileList) {
       setSelected(t, !el.classList.contains('selected'));
     });
     pp.addEventListener('click', () => (video.paused ? video.play() : video.pause()));
+    el.querySelector('.zoom').addEventListener('click', () => setPrimary(t));
     seek.addEventListener('input', () => {
       seeking = true;
       if (video.duration) video.currentTime = (seek.value / 1000) * video.duration;
@@ -244,11 +291,15 @@ $('syncAll').addEventListener('click', () => {
   const ref = tiles[0].video.currentTime;
   tiles.forEach((t) => (t.video.currentTime = Math.min(ref, t.video.duration || ref)));
 });
+$('audioFollows').addEventListener('change', (e) => {
+  if (e.target.checked && primary) tiles.forEach((x) => setSelected(x, x === primary));
+});
 $('audioAll').addEventListener('click', () => tiles.forEach((t) => setSelected(t, true)));
 $('audioNone').addEventListener('click', () => tiles.forEach((t) => setSelected(t, false)));
 $('clear').addEventListener('click', () => {
   tiles.forEach((t) => { t.video.pause(); t.video.removeAttribute('src'); t.video.load(); URL.revokeObjectURL(t.url); });
   tiles = [];
+  primary = null;
   grid.innerHTML = '';
   layout();
   updatePlayAllLabel();
