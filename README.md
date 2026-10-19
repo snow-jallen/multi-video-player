@@ -1,6 +1,6 @@
 # Multi Video Player
 
-Single-page app: open `index.html` in a browser, pick several video files, and they play side by side in a grid.
+Single-page app: open `index.html` in a browser, pick up to 9 video files, and they play side by side in a grid.
 
 - **Play all / Pause all** (or Space) controls every video at once
 - Hover a video for its own play/pause, seek, and volume

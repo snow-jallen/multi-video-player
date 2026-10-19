@@ -35,6 +35,13 @@
   button:disabled { opacity: 0.4; cursor: default; }
   .hint { color: var(--muted); font-size: 12px; }
   input[type=file] { display: none; }
+  label.btn.disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+  #toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: #2a2e38; border: 1px solid #3a3f4c; padding: 8px 14px; border-radius: 6px;
+    opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 10;
+  }
+  #toast.show { opacity: 1; }
 
   #grid {
     flex: 1; display: grid; gap: 4px; padding: 4px; min-height: 0;
@@ -83,6 +90,7 @@
 <header>
   <label class="btn primary" for="files" style="background:var(--accent);border-color:var(--accent);color:#fff">Open videos…</label>
   <input id="files" type="file" accept="video/*" multiple>
+  <span id="count" class="hint"></span>
   <button id="playAll" disabled>▶ Play all</button>
   <button id="restartAll" disabled>⏮ Restart all</button>
   <button id="syncAll" disabled title="Snap every video to the first video's timestamp">⇆ Sync</button>
@@ -98,12 +106,23 @@
   <div>Click <b>Open videos…</b> or drag video files here</div>
 </div>
 <div id="grid" hidden></div>
+<div id="toast"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const grid = $('grid'), empty = $('empty'), fileInput = $('files');
 const playAllBtn = $('playAll');
+const MAX_VIDEOS = 9;
 let tiles = []; // { el, video, url }
+
+let toastTimer;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 3500);
+}
 
 const fmt = (s) => {
   if (!isFinite(s)) return '0:00';
@@ -118,6 +137,10 @@ function layout() {
   grid.hidden = !hasVideos;
   empty.hidden = hasVideos;
   for (const id of ['playAll', 'restartAll', 'syncAll', 'audioAll', 'audioNone', 'clear']) $(id).disabled = !hasVideos;
+  const full = n >= MAX_VIDEOS;
+  fileInput.disabled = full;
+  document.querySelector('label[for=files]').classList.toggle('disabled', full);
+  $('count').textContent = hasVideos ? `${n} / ${MAX_VIDEOS}` : `up to ${MAX_VIDEOS} videos`;
   if (!hasVideos) return;
 
   // Pick the column count that makes tiles closest to 16:9 for the current window.
@@ -130,8 +153,8 @@ function layout() {
     const score = -area;
     if (score < bestScore) { bestScore = score; best = cols; }
   }
-  grid.style.gridTemplateColumns = `repeat(${best}, 1fr)`;
-  grid.style.gridTemplateRows = `repeat(${Math.ceil(n / best)}, 1fr)`;
+  grid.style.gridTemplateColumns = `repeat(${best}, minmax(0, 1fr))`;
+  grid.style.gridTemplateRows = `repeat(${Math.ceil(n / best)}, minmax(0, 1fr))`;
 }
 
 function setSelected(t, on) {
@@ -146,7 +169,12 @@ function updatePlayAllLabel() {
 }
 
 function addFiles(fileList) {
-  const files = [...fileList].filter((f) => f.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|m4v|ogv)$/i.test(f.name));
+  const all = [...fileList].filter((f) => f.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|m4v|ogv)$/i.test(f.name));
+  const room = MAX_VIDEOS - tiles.length;
+  const files = all.slice(0, Math.max(room, 0));
+  if (all.length > files.length) {
+    toast(`Limit is ${MAX_VIDEOS} videos — skipped ${all.length - files.length} file${all.length - files.length === 1 ? '' : 's'}.`);
+  }
   for (const file of files) {
     const url = URL.createObjectURL(file);
     const el = document.createElement('div');
